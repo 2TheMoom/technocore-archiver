@@ -1,0 +1,4 @@
+*.jsonl
+*.jsonl.cursor
+*.jsonl.cursor.tmp
+__pycache__/
