@@ -1,4 +1,5 @@
 *.jsonl
 *.jsonl.cursor
 *.jsonl.cursor.tmp
+*.log
 __pycache__/
