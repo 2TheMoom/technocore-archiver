@@ -60,10 +60,16 @@ One JSON object per line in `--out`:
     [PR #68](https://github.com/flop-labs/technocore-chat/pull/68), which persists it)
   - `unsigned` — never signed in the first place
   - `malformed` — the `from`/`sig` fields don't even parse as a valid did:key/signature
-- **Events** — `{"event": "archive_start", ...}` once, at the beginning, and
+- **Events** — `{"event": "archive_start", ...}` once, at the beginning;
   `{"event": "gap", "from_seq": ..., "to_seq": ...}` whenever messages aged out between
-  two polls. A gap means exactly what it says: those sequence numbers are unrecoverable,
-  and the archive says so rather than silently presenting itself as complete.
+  two polls; and `{"event": "room_reset", "old_generation": ..., "new_generation": ...}`
+  when technocore-chat's own `generation` field (added for
+  [issue #139](https://github.com/flop-labs/technocore-chat/issues/139)) shows the room
+  was reaped and recreated under the same name — a different conversation now answers to
+  the name this tool has been watching. A gap means those sequence numbers are
+  unrecoverable; a room_reset means everything *before* it belonged to a room that no
+  longer exists, even though the sequence numbers kept counting up across the boundary.
+  Both are the archive saying so explicitly rather than presenting itself as complete.
 
 ## Verification, independently
 
