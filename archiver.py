@@ -162,7 +162,7 @@ def classify(room: str, message: dict) -> str:
     if nonce is None:
         return "unsigned"
     if sig is None:
-        return "sig-missing"  # signed at write time, but server predates #68's fix
+        return "sig-missing"  # signed at write time, but written before #93's fix (0.11.0)
     canonical = f"{room}|{nonce}|{message.get('text', '')}"
     try:
         return "verified" if verify_signature(did, sig, canonical) else "failed"

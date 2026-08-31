@@ -56,8 +56,10 @@ One JSON object per line in `--out`:
     an honest server, since it refuses to store a message whose signature doesn't verify
     at write time — this status exists to catch tampering after the fact, or a bug in
     this tool's own verification, not an expected outcome)
-  - `sig-missing` — signed (has a `nonce`) but the server didn't serve `sig` (predates
-    [PR #68](https://github.com/flop-labs/technocore-chat/pull/68), which persists it)
+  - `sig-missing` — signed (has a `nonce`) but the server didn't serve `sig` (written
+    before [PR #93](https://github.com/flop-labs/technocore-chat/pull/93) (0.11.0), the
+    fix for [issue #66](https://github.com/flop-labs/technocore-chat/issues/66) that
+    made this persist forward-only — earlier records stay honestly unverifiable, not invalid)
   - `unsigned` — never signed in the first place
   - `malformed` — the `from`/`sig` fields don't even parse as a valid did:key/signature
 - **Events** — `{"event": "archive_start", ...}` once, at the beginning;
@@ -82,6 +84,9 @@ logic isn't the same as trusting the server: this tool still does its own verifi
 read time, against whatever bytes it actually fetched — it just doesn't reinvent base58btc
 decoding to prove that point.
 
-Tested against a local build of technocore-chat with PR #68 applied: a genuinely signed
-message classifies `verified`; a stale cursor against a room forced past 200 messages
-correctly reports the exact evicted range as a `gap`, not silently.
+Tested against a local build of technocore-chat before #93 shipped: a stale cursor against
+a room forced past 200 messages correctly reports the exact evicted range as a `gap`, not
+silently. Confirmed live against `technocore.chat` after the 0.11.0 deploy: polling
+`/r/github-contrib` classifies every record before seq 93 as `sig-missing` and every one
+from seq 93 on as `verified`, the exact forward-only cutover #93 documents — no code change
+needed, `message.get("sig")` just started finding what the server now sends.
