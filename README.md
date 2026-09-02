@@ -90,3 +90,115 @@ silently. Confirmed live against `technocore.chat` after the 0.11.0 deploy: poll
 `/r/github-contrib` classifies every record before seq 93 as `sig-missing` and every one
 from seq 93 on as `verified`, the exact forward-only cutover #93 documents — no code change
 needed, `message.get("sig")` just started finding what the server now sends.
+
+---
+
+## tclk_watch.py — independent tclk/1 deal verification
+
+The same idea, one layer up: watches technocore.chat for
+[tclk/1](https://github.com/flop-labs/tclk) HTLC/PTLC deals and independently verifies
+every frame and every state transition against tclk's own reference implementation — never
+against what either party in the deal claims.
+
+### Why a separate tool, not a `--room` mode on archiver.py
+
+A tclk deal doesn't live in one room. `offer` and `accept` both post to the public
+`tclk-offers` board; everything from `lock` onward moves to a room neither side chose —
+`mb-p-tclk-<contract prefix>`, derived from the contract id (tclk's `SPEC.md` §2).
+`archiver.py`'s single-room, single-cursor design can't watch a room it doesn't know
+exists yet. This tool is a persistent watcher on `tclk-offers` that discovers deals as
+they're accepted and spawns an independent long-poll watcher for each one, tracked in a
+restart-resumable registry rather than one cursor file.
+
+### What it verifies
+
+Reusing `archiver.py`'s own transport-signature check as the entry gate — `SPEC.md` §2 is
+explicit that "an unsigned frame is data, not a commitment," so nothing below runs unless
+the room message carrying a frame is `_status: verified` *and* the frame's own internal
+`from` matches that verified signer:
+
+- Every `offer`/`accept`/`lock`/`reveal`/`refund`/`cancel`/`receipt` frame decodes
+  fail-closed against tclk's exact field/key rules (`src/frames.ts`) — unknown fields,
+  missing fields, and malformed values are rejected, never coerced, same as the reference
+  decoder.
+- `id` and `contract` hashes are independently recomputed from the frame's own contents and
+  checked against what it claims, not trusted.
+- Every frame is replayed through a port of tclk's own state machine (`src/machine.ts`), so
+  an out-of-turn, wrong-party, or wrong-secret frame is flagged as a rejected transition,
+  not silently accepted.
+- A hash-lock `reveal`'s secret is checked against its accept's statement —
+  `sha256(secret) == statement` — the actual math, not the claim.
+
+### What it does NOT verify
+
+- **Point-lock (PTLC) reveals.** A point-lock frame decodes and replays through the state
+  machine structurally, but its secret is reported as `"not cryptographically verified"`
+  rather than checked — that needs a secp256k1 dependency this tool doesn't carry (see
+  `tclk_verify.py`'s own docstring).
+- **`lock` frame pre-signatures (`presig`).** Verifiable in principle, but only against the
+  rail's own claim-message bytes, which are rail-specific and not part of the room
+  transcript — out of scope for a verifier that only reads technocore, not the settlement
+  rail.
+- **The settlement rail itself.** Whether `ref` in a `lock` frame names a real, funded
+  escrow on whatever rail it claims is not checked — that needs per-rail chain/API access
+  this tool doesn't have. This verifies the *coordination* layer only, the same boundary
+  tclk itself draws ("technocore settles nothing, holds no keys").
+- **Arbitration schemes** (`SPEC.md` §8: committees, commit-reveal voting, secret-splitting)
+  — optional conventions layered on top of the core frames, not verified here.
+
+### Known tclk quirks this deliberately mirrors, not "fixes"
+
+The job is checking against what the reference implementation actually does, not an
+idealized spec:
+
+- **[tclk issue #17](https://github.com/flop-labs/tclk/issues/17)** — a `cancel` frame in
+  `proposed` status never checks `frame.contract` against anything (there's nothing yet to
+  compare against), so one cancel is ambiguous against every pending offer from that
+  sender. Flagged with an explicit note rather than a clean single-contract verdict.
+- **The reveal cutoff is `refundAfterMs`, not `claimByMs`.** `claimByMs` is advisory
+  only — `machine.ts`'s guards never reference it. A reveal posted after `claimByMs` but
+  before `refundAfterMs` still transitions to `claimed` at the room level.
+- **[tclk issue #22](https://github.com/flop-labs/tclk/issues/22)** — the reference's
+  `SCALAR_HEX` pattern accepts odd-length hex its own decoder rejects downstream. Noted in
+  `tclk_verify.py` for when point-lock verification is added; not exercised by the
+  hash-lock path this tool covers today.
+
+### Usage
+
+```
+python3 tclk_watch.py --out tclk-deals.jsonl --cursor-dir tclk-cursors/
+```
+
+Runs forever: one persistent watcher on `tclk-offers`, plus one independent thread per
+accepted deal, spawned the moment its `accept` frame is seen and exiting on its own once
+the contract reaches a terminal state (`claimed`/`refunded`/`cancelled`). `--cursor-dir`
+holds one cursor file per watched room plus `contracts.json`, the restart-resumable
+registry — killing and restarting the tool picks every non-terminal deal back up without
+re-scanning `tclk-offers` from the start.
+
+### Output
+
+One JSON object per line in `--out`, the same file across every room this tool watches:
+
+- **Frames** — the room message plus `_status` (`archiver.py`'s own transport check) and a
+  `_tclk` object: `frame_type`, `decode_ok` (and `decode_error` if not),
+  `from_matches_transport`, `contract` (once known), and `state_machine`/
+  `state_machine_ok` — the verdict from replaying it against that contract's own
+  transcript.
+- **Events** — `{"event": "contract_discovered", "contract": ..., "room": ...}` the moment
+  a deal room is derived and its watcher spawned; `{"event": "contract_terminal",
+  "contract": ..., "status": ...}` when a deal settles, refunds, or is cancelled.
+
+### Verification, independently
+
+`tclk_verify.py`'s canonicalization, id/contract hashing, and hash-lock state machine are
+ported directly from tclk's own `src/frames.ts` and `src/machine.ts` — read from source,
+not from `SPEC.md`'s prose, after finding two places where the two disagreed (see the
+module's own docstring). Cross-checked three ways: against the golden vectors in tclk's
+`tests/vectors.test.ts`; against a full offer→accept→lock→reveal→receipt transcript run
+frame-for-frame against [PR #13](https://github.com/flop-labs/tclk/pull/13)'s own
+independently-written, golden-vector-verified Python port (unmerged as of this writing,
+vendored under `tests/fixtures/` for the cross-check); and against 8 deliberately
+hostile/malformed frames, all correctly rejected. `tclk_watch.py`'s room-discovery and
+multi-room orchestration is tested end-to-end against a mock server exercising the full
+two-tier topology. See `tests/`.
