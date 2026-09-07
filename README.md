@@ -139,12 +139,36 @@ the room message carrying a frame is `_status: verified` *and* the frame's own i
   rail's own claim-message bytes, which are rail-specific and not part of the room
   transcript — out of scope for a verifier that only reads technocore, not the settlement
   rail.
-- **The settlement rail itself.** Whether `ref` in a `lock` frame names a real, funded
-  escrow on whatever rail it claims is not checked — that needs per-rail chain/API access
-  this tool doesn't have. This verifies the *coordination* layer only, the same boundary
-  tclk itself draws ("technocore settles nothing, holds no keys").
+- **Any settlement rail except `paper`.** Whether `ref` in a `lock` frame names a real,
+  funded escrow on `flop-htlc`, `evm-htlc`, `x402`, or any other rail is not checked — that
+  needs per-rail chain/API access this tool doesn't have. This verifies the *coordination*
+  layer only for those rails, the same boundary tclk itself draws ("technocore settles
+  nothing, holds no keys"). The one exception is `paper` — see below — because its record
+  lives on technocore itself, not on a chain this tool would need separate access to.
 - **Arbitration schemes** (`SPEC.md` §8: committees, commit-reveal voting, secret-splitting)
   — optional conventions layered on top of the core frames, not verified here.
+
+### The one rail it does cross-check: `paper`
+
+`paper` is tclk's rehearsal rail (`src/paper-rail.ts`) — its own module docstring says
+plainly that it "settles nothing" and a matching record is "evidence of a rehearsal, never
+of a payment." Because its record is a technocore note, not chain state, this tool can read
+it the same way it reads everything else, with no new dependency:
+
+- **`lock.ref == lock.contract`, checked before anything else.** `PaperRail.verifyLock`
+  requires the two to match exactly; a shortened label in `ref` fails this deterministically,
+  with no note read needed to know it.
+- **The note itself** (`/kv/tclk-paper-<hex>/<hex>`, `paper-rail.ts`'s own sharding) is fetched
+  and compared against what the room's own frames already established — lock kind, statement,
+  and `refundAfterMs` — every time the contract's status changes (`locked`, then `claimed` or
+  `refunded`).
+- **Retried, not one-shot.** Nothing guarantees the note write and the room frame land in the
+  same poll. An unresolved check retries on every subsequent poll of that deal room; reaching
+  a terminal status gives it a few more grace polls rather than stopping mid-race and calling
+  a normal delay a mismatch.
+- **Every field says "paper rail" on purpose.** This never reports a payment or a settlement
+  — only whether a record exists where expected and agrees with the room's own transcript,
+  because that is genuinely all a match here can mean.
 
 ### Known tclk quirks this deliberately mirrors, not "fixes"
 
@@ -187,7 +211,11 @@ One JSON object per line in `--out`, the same file across every room this tool w
   transcript.
 - **Events** — `{"event": "contract_discovered", "contract": ..., "room": ...}` the moment
   a deal room is derived and its watcher spawned; `{"event": "contract_terminal",
-  "contract": ..., "status": ...}` when a deal settles, refunds, or is cancelled.
+  "contract": ..., "status": ...}` when a deal settles, refunds, or is cancelled;
+  `{"event": "paper_rail_check", "contract": ..., "expected_status": ..., "ref_matches_contract": ...,
+  "kv_record_found": ..., "kv_terms_match": ..., "note": ...}` for a `paper`-rail deal, once
+  per status the check attempted (locked/claimed/refunded) and once per retry until it
+  resolves — see above for what a match does and doesn't mean.
 
 ### Verification, independently
 

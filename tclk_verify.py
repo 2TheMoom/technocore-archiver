@@ -448,3 +448,77 @@ def apply_frame(state: ContractState, frame: dict, now_ms: int) -> tuple[Contrac
         return state, True, "receipt acknowledged (no transition)"
 
     return state, False, f"unknown frame type: {frame_type}"
+
+
+# ── PaperRail cross-check (paper-rail.ts) — the one rail this verifier reads independently.
+#
+# PaperRail settles nothing and holds no value (its own module docstring: "verifyLock
+# returning true means a string is present in a namespace a stranger could have written; it
+# is evidence of a rehearsal, never of a payment"). Everything below preserves that framing
+# exactly — it never reports a "payment" or "settlement", only whether a record exists at
+# the expected location and agrees with what the room's own signed frames already
+# established. Every other rail (flop-htlc, evm-htlc, x402, near-htlc) needs its own
+# integration and is out of scope here; a lock on any other rail is reported as
+# rail_verified: null, not silently skipped.
+
+PAPER_RECORD_PREFIX = "tclkpaper1"
+_CONTRACT_ID_RE = re.compile(r"^0x[0-9a-f]{64}$")
+
+
+def paper_note(contract: str) -> tuple[str, str]:
+    """Where a contract's paper-rail record lives — ported from paper-rail.ts's paperNote,
+    sharded the same way the coordination state note is."""
+    if not _CONTRACT_ID_RE.match(contract):
+        raise ValueError(f"malformed contract id: {contract}")
+    return f"tclk-paper-{contract[2:4]}", contract[4:18]
+
+
+def decode_paper_record(value: str) -> dict | None:
+    """None on anything malformed. This namespace is world-writable (paper-rail.ts's own
+    decodePaperRecord makes the same choice), so a bad line must not raise inside a polling
+    loop — it is anonymous input like any other note value.
+
+    Point-lock statements are checked for shape (HEX33) only, not on-curve validity — the
+    same secp256k1-dependency boundary this module already draws for reveal verification."""
+    parts = value.split(" ")
+    if not (5 <= len(parts) <= 6):
+        return None
+    prefix, status, lock, statement, refund_after = parts[:5]
+    secret = parts[5] if len(parts) == 6 else None
+    if prefix != PAPER_RECORD_PREFIX:
+        return None
+    if status not in ("locked", "claimed", "refunded"):
+        return None
+    if lock not in ("hash", "point"):
+        return None
+    fits = HEX32.match(statement) if lock == "hash" else HEX33.match(statement)
+    if not fits:
+        return None
+    try:
+        refund_after_ms = int(refund_after)
+    except ValueError:
+        return None
+    if refund_after_ms <= 0:
+        return None
+    if secret is not None and not HEX32.match(secret):
+        return None
+    if (status == "claimed") != (secret is not None):
+        return None
+    record = {"status": status, "lock": lock, "statement": statement, "refundAfterMs": refund_after_ms}
+    if secret is not None:
+        record["secret"] = secret
+    return record
+
+
+def paper_record_matches(record: dict, expected_status: str, lock_kind: str,
+                          statement: str, refund_after_ms: int) -> bool:
+    """True iff a decoded paper record's terms match what the room's own signed frames
+    already established — the field comparison half of PaperRail.verifyLock (paper-rail.ts),
+    generalized to any status so the same check covers lock/claimed/refunded, not lock alone.
+    The ref==contract half of verifyLock needs no note read at all — see tclk_watch.py."""
+    return (
+        record["status"] == expected_status
+        and record["lock"] == lock_kind
+        and record["statement"] == statement
+        and record["refundAfterMs"] == refund_after_ms
+    )

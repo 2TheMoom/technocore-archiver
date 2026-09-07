@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["cryptography==50.0.0"]
-# ///
 """Independent, continuous tclk/1 deal verifier — an extension of technocore-archiver.
 
 Watches technocore.chat's public `tclk-offers` board for offer/accept frames, derives each
@@ -30,6 +26,19 @@ it has `_status == "verified"` (archiver.py's own transport-signature check) AND
 own internal `from` field matches that verified transport signer. Either failing means the
 line is decoded (if it parses) purely for visibility and flagged, never fed into a
 contract's state machine.
+
+PaperRail cross-check: when a deal locks (or later claims/refunds) on the `paper` rail, this
+also reads the rail's own note record (`/kv/tclk-paper-<hex>/<hex>`, tclk_verify.py's
+paper_note/decode_paper_record, ported from paper-rail.ts) and confirms it agrees with what
+the room's own frames already established — never more than that. PaperRail's own docstring
+is explicit that a matching record is "evidence of a rehearsal, never of a payment," and
+every field this tool reports about it says "paper rail" for the same reason: it must never
+read as a real settlement check. Nothing guarantees the room frame and the rail write land
+in the same instant, so an unresolved check is retried once per subsequent poll of that deal
+room (via watch_room's on_poll hook) until it resolves or the contract goes terminal — a
+single one-shot check would misreport a normal race as a mismatch. Every other rail
+(flop-htlc, evm-htlc, x402, near-htlc) is out of scope and reported as
+`rail_verified: null`, not silently skipped.
 """
 
 from __future__ import annotations
@@ -40,6 +49,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.request
 from dataclasses import asdict
 from pathlib import Path
 
@@ -54,6 +64,26 @@ def deal_room_name(contract: str) -> str:
     """mb-p-tclk-<first 16 hex of the contract id, no 0x>, per SPEC.md §2."""
     hexpart = contract[2:] if contract.startswith("0x") else contract
     return f"mb-p-tclk-{hexpart[:16]}"
+
+
+def read_note(base_url: str, ns: str, key: str, timeout: float) -> str | None:
+    """The raw value of one technocore note, or None if absent (verified live: a missing
+    key is a plain 404, not a 200 with an empty body).
+
+    Single-note reads have no JSON mode at all -- verified directly against the live
+    service, not assumed from the room-read API's shape -- just a fixed untrusted-content
+    banner, a blank line, then the raw stored value. This strips exactly that preamble."""
+    url = f"{base_url}/kv/{ns}/{key}"
+    request = urllib.request.Request(url, headers={"User-Agent": base.USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    _, _, value = body.partition("\n\n")
+    return value.rstrip("\n")
 
 
 # ── Shared, thread-safe sinks ─────────────────────────────────────────────────
@@ -230,7 +260,12 @@ def watch_room(
     on_message,
     stop: threading.Event,
     label: str,
+    on_poll=None,
 ) -> None:
+    """`on_poll`, if given, runs once per loop iteration after that cycle's messages (zero
+    or more) are processed -- the hook a check that can't resolve from a single message
+    needs, since nothing guarantees a matching write (e.g. a paper-rail note) lands in the
+    same poll as the frame that triggered it."""
     cursor = base.Cursor(cursor_dir / f"{room}.cursor")
     state = cursor.read()
     first_run = state is None
@@ -259,6 +294,8 @@ def watch_room(
 
         for message in messages:
             on_message(message)
+        if on_poll is not None:
+            on_poll()
 
         if messages and "last_seq" in view:
             last_seq = view["last_seq"]
@@ -289,6 +326,89 @@ def run_deal_room(
         raise RuntimeError(f"contract {contract}: replaying its own accept failed: {note}")
     stop = threading.Event()
     lock = threading.Lock()
+    # One entry per status ("locked"/"claimed"/"refunded") once its paper-rail check has
+    # resolved — matched, permanently mismatched, or the contract went terminal without
+    # ever finding a match. Absent means "not yet checked or still retrying".
+    paper_resolved: dict[str, bool] = {}
+    # Reaching a terminal status would otherwise stop this watcher's loop on the very next
+    # check — leaving no "next poll" for an unresolved paper check to retry on, even though
+    # the race it exists to survive (the rail write landing after the room frame) is exactly
+    # as possible at claimed/refunded as it is at locked. A few grace polls after going
+    # terminal give that race the same chance to resolve it gets at every other status.
+    TERMINAL_GRACE_POLLS = 3
+    terminal_grace_remaining: int | None = None
+
+    def attempt_paper_check(expected_status: str, give_up: bool = False) -> dict | None:
+        """None when there's nothing to check: not a paper-rail lock, or already resolved
+        for this status. Otherwise the rail_check report, written to sink by the caller.
+
+        `give_up` is the caller's decision, not this function's: whether a terminal status
+        should stop retrying is a question about how many grace polls are left on the
+        watcher's own loop (on_poll tracks that), not something this pure check can know —
+        it only ever reports what it found and whether it was told to accept a final answer.
+        """
+        if state.rail != "paper" or paper_resolved.get(expected_status):
+            return None
+        ref_matches = state.rail_ref == state.contract
+        report: dict = {"rail": "paper", "expected_status": expected_status,
+                         "ref_matches_contract": ref_matches}
+        if not ref_matches:
+            # PaperRail.verifyLock (paper-rail.ts) requires ref === contract exactly, before
+            # ever reading the note — this is definitive and permanent, not a race.
+            paper_resolved[expected_status] = True
+            report["kv_checked"] = False
+            report["note"] = ("lock.ref is not the full contract id — PaperRail.verifyLock "
+                               "would fail on this alone; not reading the note")
+            return report
+
+        ns, key = tv.paper_note(state.contract)
+        try:
+            raw = read_note(args.base_url, ns, key, timeout=10)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            report["kv_checked"] = False
+            if give_up:
+                paper_resolved[expected_status] = True
+            report["note"] = f"note read failed{' (giving up)' if give_up else ', will retry'}: {exc}"
+            return report
+        report["kv_checked"] = True
+
+        if raw is None:
+            report["kv_record_found"] = False
+            if give_up:
+                paper_resolved[expected_status] = True
+                report["note"] = "no paper-rail record found after retrying"
+            else:
+                report["note"] = "no paper-rail record yet — will retry on the next poll"
+            return report
+
+        record = tv.decode_paper_record(raw)
+        report["kv_record_found"] = True
+        if record is None:
+            paper_resolved[expected_status] = True  # unparseable is permanent, not a race
+            report["kv_terms_match"] = False
+            report["note"] = "paper-rail record present but unparseable"
+            return report
+
+        matches = tv.paper_record_matches(record, expected_status, state.lock_kind,
+                                           state.statement, state.offer["refundAfterMs"])
+        report["kv_status"] = record["status"]
+        report["kv_terms_match"] = matches
+        if matches:
+            paper_resolved[expected_status] = True
+            report["note"] = ("matches — evidence of a rehearsal, never of a payment "
+                               "(the paper rail settles nothing)")
+        elif give_up:
+            paper_resolved[expected_status] = True
+            report["note"] = "record present but terms disagree after retrying"
+        else:
+            report["note"] = "record present but terms disagree yet — will retry on the next poll"
+        return report
+
+    def check_and_report(expected_status: str, give_up: bool = False) -> None:
+        report = attempt_paper_check(expected_status, give_up=give_up)
+        if report is not None:
+            sink.write({"event": "paper_rail_check", "contract": contract, "room": room,
+                        "checked_at": time.time(), **report})
 
     def on_message(message: dict) -> None:
         nonlocal state
@@ -302,11 +422,37 @@ def run_deal_room(
                             "event": "contract_terminal", "contract": contract, "room": room,
                             "status": new_state.status, "detected_at": time.time(),
                         })
-                        stop.set()
+                        # Stopping happens in on_poll, once any pending paper-rail check for
+                        # this status has had its grace polls — not here, immediately.
                 state = new_state
+                if state.status in ("locked", "claimed", "refunded"):
+                    check_and_report(state.status)
+
+    def on_poll() -> None:
+        nonlocal terminal_grace_remaining
+        with lock:
+            is_terminal = state.status in tv.TERMINAL_STATUSES
+            # Absent from paper_resolved means "never checked yet", which is unresolved --
+            # the default belongs on the False side, not True. Getting this backwards once
+            # already cost a real bug: it made an unresolved status look resolved on the
+            # very first poll, so the loop stopped after two mismatches without ever
+            # reaching the grace countdown at all. See test_paper_rail.py.
+            pending_paper = (is_terminal and state.rail == "paper"
+                              and not paper_resolved.get(state.status, False))
+            give_up = False
+            if pending_paper:
+                if terminal_grace_remaining is None:
+                    terminal_grace_remaining = TERMINAL_GRACE_POLLS
+                give_up = terminal_grace_remaining <= 0
+            if state.status in ("locked", "claimed", "refunded"):
+                check_and_report(state.status, give_up=give_up)
+            if pending_paper and not give_up:
+                terminal_grace_remaining -= 1
+            if is_terminal and (state.rail != "paper" or paper_resolved.get(state.status, False)):
+                stop.set()
 
     watch_room(room, args.base_url, args.wait, Path(args.cursor_dir), on_message, stop,
-               label=f"deal {contract[:18]}")
+               label=f"deal {contract[:18]}", on_poll=on_poll)
 
 
 def run_offers_board(
