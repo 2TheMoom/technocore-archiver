@@ -230,3 +230,62 @@ vendored under `tests/fixtures/` for the cross-check); and against 8 deliberatel
 hostile/malformed frames, all correctly rejected. `tclk_watch.py`'s room-discovery and
 multi-room orchestration is tested end-to-end against a mock server exercising the full
 two-tier topology. See `tests/`.
+
+---
+
+## tcr1_export.py — exporting a verified deal as a TCR-1 artifact
+
+[TCR-1](https://github.com/wanshade/tc-receipts) is an external, independently-verifiable
+task-completion receipt profile proposed in
+[flop-labs/technocore-chat#281](https://github.com/flop-labs/technocore-chat/issues/281).
+This module exports a tclk/1 deal's terminal state — once `tclk_verify.py` has
+independently replayed and confirmed it, the same way `tclk_watch.py` already does — as a
+TCR-1 `{type, uri, sha256, size}` artifact descriptor, meant to be referenced from someone
+else's `artifacts[]` array in a signed task receipt.
+
+### What the artifact says, and what it does not
+
+- It reports that a signed, multi-frame tclk/1 protocol run (`offer → accept → lock →
+  reveal/refund/cancel`) independently verified by this repo's own decoder and state
+  machine reached a terminal status — `claimed`, `refunded`, or `cancelled`.
+- If the deal used the `paper` rail, the artifact carries that deal's last
+  `paper_rail_check` result (`ref_matches_contract`, `kv_record_found`, `kv_terms_match`)
+  as its own, separately-labeled field. It never folds into or overrides the completion
+  claim — `contract.status` comes entirely from replaying the room's own signed frames, the
+  same source `tclk_watch.py` already trusts for it.
+- It explicitly disclaims payment or fund movement on any settlement rail, task
+  acceptance, authorship, or eligibility — the same boundary every other implementation in
+  #281's interoperability thread has held to. `PaperRail`'s own module docstring is blunt
+  about why a match there is "evidence of a rehearsal, never of a payment."
+
+### Usage
+
+```python
+>>> import tcr1_export
+>>> descriptor = tcr1_export.write_artifact("deal.tcr1.json", terminal_state, paper_check)
+{"type": "technocore-tclk-deal-receipt", "uri": "file:deal.tcr1.json", "sha256": "...", "size": 512}
+```
+
+`terminal_state` is the `tclk_verify.ContractState` `tclk_watch.py` already holds once a
+deal reaches a terminal status; `paper_check` is that deal's last `paper_rail_check` event,
+or omit it for a non-`paper` rail. `write_artifact` creates the file exclusively and never
+overwrites existing evidence, the same convention `technocore-receipt-verifier`'s own TCR-1
+exporter uses in the same thread.
+
+### Verification, independently — against the real TCR-1 implementation, not a copy of it
+
+`tests/test_tcr1_export.py` does not just check this module's own output is
+self-consistent. It builds a real signed TCR-1 receipt using `tc-receipts`' own code
+([wanshade/tc-receipts](https://github.com/wanshade/tc-receipts), pinned to the immutable
+commit cited in #281), referencing an artifact this module exported, and confirms two
+things computed independently agree byte for byte: `tc-receipts`' own `hash_file()` and
+this module's own descriptor produce the identical SHA-256 and size over the same artifact
+bytes, and `tc-receipts`' own `verify_receipt()` accepts the result end-to-end. That is the
+raw-bytes-canonicalism discipline `0xsheva`'s `technocore-keyhole` asked #281's
+interoperability thread to hold: the artifact is the exact bytes written, never a
+re-serialization a second verifier might disagree with by accident.
+
+This is the one dependency in this repo beyond `cryptography`: `pip install tc-receipts`
+pulls in `jsonschema` for `tests/test_tcr1_export.py` specifically (see
+`.github/workflows/ci.yml`). No other file here needs it, and nothing in `tclk_watch.py`'s
+own loop depends on this module — it stays standalone and opt-in.

@@ -1,0 +1,28 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install cryptography
+          # Pinned to the immutable commit cited in flop-labs/technocore-chat#281 --
+          # tc-receipts isn't published on PyPI, and test_tcr1_export.py's whole point is
+          # exercising the real package, not a stand-in for it.
+          python3 -m pip install "git+https://github.com/wanshade/tc-receipts.git@37c9a0eddcc56e414fe9c462c14b7f9f424dc596"
+      - name: Run tests
+        run: |
+          python3 tests/test_tclk_verify.py
+          python3 tests/test_tclk_watch.py
+          python3 tests/test_paper_rail.py
+          python3 tests/test_tcr1_export.py
