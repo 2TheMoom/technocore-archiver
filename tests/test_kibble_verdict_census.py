@@ -82,10 +82,27 @@ def test_reject_control_is_independent_of_accept_census():
     print("PASS: accept and reject-control censuses are tallied independently of each other")
 
 
+def test_single_reason_count_distinguishes_one_prolific_identity_from_many_one_shot_ones():
+    """One identity posting the same reason 7 times must report as 1 identity / 7
+    verdicts, not 7 -- a live run of this tool was misread as "7 identities" when it was
+    actually one, because the two numbers weren't reported separately. Pinning it here so
+    that ambiguity can't come back."""
+    records = [
+        _rec(i, DID_A, f"ATTEST v1 | k{i:03d} | useful | Content provides technical depth and satisfies success tokens.")
+        for i in range(1, 8)
+    ]
+    result = kvc.report(records)["accepts"]
+    assert result["single_reason_attestors"] == 1
+    assert result["single_reason_verdicts"] == 7
+    print("PASS: one identity repeating the same reason 7 times reports as 1 identity / "
+          "7 verdicts, not conflated into a single ambiguous number")
+
+
 if __name__ == "__main__":
     test_same_job_repost_is_a_revision_not_reuse()
     test_reuse_across_different_jobs_is_counted()
     test_template_blanking_catches_category_and_digit_parameterised_reuse()
     test_unverified_transport_is_never_counted()
     test_reject_control_is_independent_of_accept_census()
+    test_single_reason_count_distinguishes_one_prolific_identity_from_many_one_shot_ones()
     print("\nALL CHECKS PASSED")

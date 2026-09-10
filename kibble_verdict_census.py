@@ -87,7 +87,7 @@ def census(verdicts: list[dict]) -> dict:
         by_attestor[v["who"]].setdefault(v["job"], v)
 
     total = exact_reused = template_reused = 0
-    single_reason_accepts = 0
+    single_reason_attestors = single_reason_verdicts = 0
     for jobs in by_attestor.values():
         rows = list(jobs.values())
         exact_counts = collections.Counter(normalise(r["reason"]) for r in rows)
@@ -96,7 +96,8 @@ def census(verdicts: list[dict]) -> dict:
         exact_reused += sum(n for n in exact_counts.values() if n >= 2)
         template_reused += sum(n for n in tmpl_counts.values() if n >= 2)
         if len(rows) >= 3 and len(exact_counts) == 1:
-            single_reason_accepts += len(rows)
+            single_reason_attestors += 1
+            single_reason_verdicts += len(rows)
 
     return {
         "total": total,
@@ -104,7 +105,13 @@ def census(verdicts: list[dict]) -> dict:
         "exact_reused_pct": 100.0 * exact_reused / total if total else 0.0,
         "template_reused": template_reused,
         "template_reused_pct": 100.0 * template_reused / total if total else 0.0,
-        "single_reason_attestor_verdicts": single_reason_accepts,
+        # Two different counts on purpose, easy to conflate: how many DISTINCT identities
+        # have posted >=3 accepts that are all one verbatim reason, versus how many total
+        # verdicts those few identities are responsible for. A "7" that is actually one
+        # identity posting seven times reads very differently from seven identities doing
+        # it once each -- report both rather than let a caller's label pick one silently.
+        "single_reason_attestors": single_reason_attestors,
+        "single_reason_verdicts": single_reason_verdicts,
         "distinct_attestors": len(by_attestor),
     }
 
@@ -149,7 +156,8 @@ def main() -> None:
         print(f"   verdicts (one per attestor-job)       : {c['total']}")
         print(f"   reason reused verbatim on another job : {c['exact_reused']}  ({c['exact_reused_pct']:.1f}%)")
         print(f"   reused after blanking category/digits : {c['template_reused']}  ({c['template_reused_pct']:.1f}%)")
-        print(f"   from attestors whose accepts are 100% one reason (n>=3): {c['single_reason_attestor_verdicts']}")
+        print(f"   identities whose accepts are 100% one reason (n>=3)  : {c['single_reason_attestors']}"
+              f"  ({c['single_reason_verdicts']} verdict(s) from them)")
 
 
 if __name__ == "__main__":
