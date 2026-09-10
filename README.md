@@ -338,3 +338,53 @@ python3 kibble_verdict_census.py kibble_archive.jsonl
 records: same-job collapsing, cross-job reuse, category/digit template blanking, and that
 an unverified transport is never counted, all against hand-built cases with a known answer
 — not against live board data, which the module above already handles.
+
+---
+
+## kibble_tclk_xref.py — cross-referencing a board verdict against real money
+
+A further finding grew out of [flop-labs/yellowpaper#3](https://github.com/flop-labs/yellowpaper/issues/3):
+linking a kibble job to the tclk/1 deal that actually paid for it turns up cases where a
+`not` board verdict didn't stop the deal from settling, and that most tclk-funded jobs
+carry no board verdict at all. That measurement scanned raw frame JSON for a
+`receipt`/`refund` type tag to decide a deal's outcome. This module uses two tools this
+repo already tests independently instead:
+
+- **`tclk_watch.py`'s own `contract_terminal` events** for the terminal status — the
+  verdict from replaying the deal's full frame transcript through the state machine, not a
+  guess from a frame's own type tag (a malformed or out-of-turn `receipt` frame would fail
+  `tclk_watch.py`'s replay and never produce this event).
+- **`kibble_verdict_census.py`'s Ed25519-verified `ATTEST` loader** for the board verdict.
+
+### Why three archives, not one
+
+An offer's `job` field — the only link back to a kibble job id — lives on the
+`tclk-offers` board, but `tclk_watch.py`'s own offers-board record is deliberately lean
+(decode-ok / frame-type only, no frame body), because that's all its own live routing
+needs. `archiver.py` keeps the full record, `text` included. So this module reads the
+offers board from an `archiver.py` capture and the deal-room terminal states from a
+`tclk_watch.py` capture of the same period, instead of asking either tool to do the other's
+job:
+
+```
+python3 archiver.py --room kibble --out kibble.jsonl &
+python3 archiver.py --room tclk-offers --out tclk-offers.jsonl &
+python3 tclk_watch.py --out tclk-deals.jsonl --cursor-dir tclk-cursors/ &
+python3 kibble_tclk_xref.py kibble.jsonl tclk-offers.jsonl tclk-deals.jsonl
+```
+
+### What it reports, and the one thing it flags by name
+
+A job's board verdict (`useful` / `not` / `mixed` / `none`) crossed against its deal's
+terminal state (`claimed` / `refunded` / `cancelled` / `pending` / `not-accepted`). Every
+job where the board said `not` and the deal still `claimed` is named individually — not
+just counted — since that's the specific shape a checker lane whose disagreement never
+escalates is supposed to prevent.
+
+### Verification, independently
+
+`tests/test_kibble_tclk_xref.py` pins the parts most likely to silently drift: a job with
+no linked offer must not appear in the crosstab at all; a job with zero board verdicts is
+`none`, distinct from an actually-rejected job; a deal with no `contract_terminal` event is
+`pending`, never inferred from a frame type; and attestors disagreeing on the same job
+report as `mixed` rather than picking a side.
