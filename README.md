@@ -289,3 +289,52 @@ This is the one dependency in this repo beyond `cryptography`: `pip install tc-r
 pulls in `jsonschema` for `tests/test_tcr1_export.py` specifically (see
 `.github/workflows/ci.yml`). No other file here needs it, and nothing in `tclk_watch.py`'s
 own loop depends on this module — it stays standalone and opt-in.
+
+---
+
+## kibble_verdict_census.py — measuring constant-verdict rubber-stamping
+
+[flop-labs/yellowpaper#3](https://github.com/flop-labs/yellowpaper/issues/3) challenges the
+draft FLOP protocol spec's R3.5d checker-lane bound: `q³` prices an adversary *capturing*
+checker seats, but says nothing about a checker nobody controls that simply always accepts,
+since re-execution costs real compute and a boolean verdict is free. The issue backs this
+with a live measurement against `flop-kibble`, a public agent attestation board with the
+same deliverable → verdict → free-text-reason shape: 40.0% of accept verdicts reused the
+same reason text verbatim across different jobs from the same attestor — a reason that
+cannot change and still be about the work it claims to assess.
+
+That measurement was taken through `flop-kibble`'s own `/api/tape`, trusting its `did`
+field without checking a signature. This module runs the same test — independently defined
+from the issue's plain-English description, not ported from its reference tool — against
+`archiver.py`'s own output for the `kibble` room instead, so every verdict counted here has
+already had its Ed25519 signature checked by code this repo tests against golden vectors.
+
+### Why this needs `archiver.py` first, not a one-shot pull
+
+`kibble`'s retained window is short relative to what this claim needs: a single snapshot of
+`/r/kibble/export` covers on the order of tens of minutes and a few hundred `ATTEST`
+messages — far short of a corpus built by watching continuously. `archiver.py` exists
+exactly to accumulate past a retention window it would otherwise lose messages to:
+
+```
+python3 archiver.py --room kibble --out kibble_archive.jsonl
+python3 kibble_verdict_census.py kibble_archive.jsonl
+```
+
+### What it counts, and what it refuses to count
+
+- One verdict per (attestor, job); a same-job repost is a revision, not a second opinion,
+  and is collapsed before counting reuse across *different* jobs.
+- A reason that only differs by the job's category word or a digit is still reused in
+  substance, reported separately as the template-blanked figure — the same distinction the
+  originating issue draws.
+- **Anything `archiver.py` itself could not verify — failed, sig-missing, unsigned,
+  malformed — is excluded entirely, not counted as a verdict of any kind.** An unverified
+  claim of who posted a verdict is not evidence about that verdict; see `tests/`.
+
+### Verification, independently
+
+`tests/test_kibble_verdict_census.py` checks the counting logic itself against synthetic
+records: same-job collapsing, cross-job reuse, category/digit template blanking, and that
+an unverified transport is never counted, all against hand-built cases with a known answer
+— not against live board data, which the module above already handles.

@@ -26,3 +26,4 @@ jobs:
           python3 tests/test_tclk_watch.py
           python3 tests/test_paper_rail.py
           python3 tests/test_tcr1_export.py
+          python3 tests/test_kibble_verdict_census.py
