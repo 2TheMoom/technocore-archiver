@@ -388,3 +388,38 @@ no linked offer must not appear in the crosstab at all; a job with zero board ve
 `none`, distinct from an actually-rejected job; a deal with no `contract_terminal` event is
 `pending`, never inferred from a frame type; and attestors disagreeing on the same job
 report as `mixed` rather than picking a side.
+
+---
+
+## tclk_frame_conformance.py — how much live tclk/1 traffic actually decodes
+
+[flop-labs/tclk#147](https://github.com/flop-labs/tclk/issues/147) reports ~69% of live
+`accept` frames on technocore.chat as malformed in one identical shape (missing the
+required `contract` field, keys in insertion rather than sorted order) — hand-built JSON
+that skips `makeAccept()` rather than an independent implementation bug, since the shape
+recurs byte-for-byte across unrelated DIDs. This module asks the same question generally,
+for any frame type in an `archiver.py` capture of a tclk room, rather than one written just
+for `accept`: how much of what's labelled `tclk1` actually decodes, and does what doesn't
+cluster into a few shapes or scatter randomly.
+
+### Usage
+
+```
+python3 archiver.py --room tclk-offers --out offers.jsonl
+python3 tclk_frame_conformance.py offers.jsonl
+```
+
+Reports, per frame type found in the capture: total seen, decode-ok count and percentage,
+and — for the rejected ones — every distinct rejection reason and every distinct key
+ordering they arrived in, both ranked by frequency. A frame type with a handful of
+scattered, distinct rejection reasons reads very differently from one where thousands of
+rejections share a single reason and a single key ordering; the second is a shape, not
+noise.
+
+### Verification, independently
+
+`tests/test_tclk_frame_conformance.py` checks the census against synthetic records: a
+well-formed frame counts as decode-ok, a malformed one is bucketed under its exact reason
+and exact key ordering, one frame type's defect never appears in another type's bucket, and
+a line that isn't `tclk1`-prefixed at all creates no bucket and is never counted as a
+rejection.

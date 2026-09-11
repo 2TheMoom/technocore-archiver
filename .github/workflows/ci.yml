@@ -28,3 +28,4 @@ jobs:
           python3 tests/test_tcr1_export.py
           python3 tests/test_kibble_verdict_census.py
           python3 tests/test_kibble_tclk_xref.py
+          python3 tests/test_tclk_frame_conformance.py
