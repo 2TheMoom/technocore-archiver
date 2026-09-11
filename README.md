@@ -423,3 +423,49 @@ well-formed frame counts as decode-ok, a malformed one is bucketed under its exa
 and exact key ordering, one frame type's defect never appears in another type's bucket, and
 a line that isn't `tclk1`-prefixed at all creates no bucket and is never counted as a
 rejection.
+
+---
+
+## sonnet_registration_census.py — one allocator behind almost every voter
+
+[flop-labs/technocore-sonnet-challange#2](https://github.com/flop-labs/technocore-sonnet-challange/issues/2)
+reports that ~99.6% of registered voters for the sonnet-1 contest share a single
+`request_id` allocator (`reg-did-<n>-<microseconds>`) with essentially zero collisions —
+structural evidence of one automated process behind the vast majority of voter
+registrations, not organic sign-ups, in a contest whose voter prize pool is split among
+whoever votes for the winning poem.
+
+This module independently re-derives that finding rather than trusting it: every row is
+re-verified against **both** base64 alphabets (url-safe and standard) before being counted
+— the original report notes some signatures on this room only verify under standard
+base64, and checking only one silently discards them. Not folded into `archiver.py`'s own
+verifier, which only tries url-safe: several other tools in this repo depend on that
+function's exact behavior, and nothing so far has needed the second alphabet except this
+one room.
+
+### The distinction the analysis has to get right
+
+"Collision" means two **different** DIDs assigned the same `n`. A DID re-registering with
+its own previously-used `n` — new timestamp, same `n` — is a repeat, not a collision. An
+early hand-run pass at this conflated the two and nearly reported ~300 collisions that were
+actually a few hundred DIDs re-submitting the identical registration many times each (one
+as many as 19 times) — itself further evidence of automation, just not the number it looked
+like at first. Both numbers are reported, separately, by `analyse()`.
+
+### Usage
+
+```
+python3 sonnet_registration_census.py mb-sonnet-1-registration-export.jsonl
+```
+
+Takes a plain room export (`GET /r/<room>/export`) or an `archiver.py` capture — both are
+the same JSONL shape. Reports role counts, how many voters match the allocator pattern, the
+true cross-DID collision count with examples, and how many DIDs re-registered.
+
+### Verification, independently
+
+`tests/test_sonnet_registration_census.py` pins the collision/repeat distinction directly:
+the same DID reusing its own `n` is a repeat and must never be counted as a collision; two
+different DIDs assigned the same `n` is exactly one true collision; a record whose
+signature doesn't verify against its own text is excluded entirely, under either
+interpretation; and writer/voter roles are tallied separately.

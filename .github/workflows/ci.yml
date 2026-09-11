@@ -29,3 +29,4 @@ jobs:
           python3 tests/test_kibble_verdict_census.py
           python3 tests/test_kibble_tclk_xref.py
           python3 tests/test_tclk_frame_conformance.py
+          python3 tests/test_sonnet_registration_census.py
