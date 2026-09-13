@@ -128,7 +128,19 @@ class ContractRegistry:
     def _flush(self) -> None:
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp.write_text(json.dumps(self._contracts, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(self.path)
+        # Windows' os.replace can transiently refuse a rename onto a file another process
+        # (antivirus, an indexer, a backup tool) has open for a moment, raising
+        # PermissionError where POSIX rename() would have just succeeded. This is a
+        # crash-the-whole-watcher bug seen live: a single lost race here took down every
+        # deal thread, not just this write. Retry briefly before giving up for real.
+        for attempt in range(5):
+            try:
+                tmp.replace(self.path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.2)
 
     def known_offers(self) -> dict[str, dict]:
         with self._lock:

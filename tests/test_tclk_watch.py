@@ -210,6 +210,66 @@ def _run_scenario():
           "the contract_discovered/contract_terminal events, and the registry's final state")
 
 
+def test_registry_flush_retries_a_transient_windows_permission_error():
+    """os.replace can raise PermissionError on Windows when another process (antivirus, an
+    indexer, a backup tool) has the target briefly open -- seen live, and it took the whole
+    watcher down rather than just the one write. _flush must retry before giving up."""
+    import unittest.mock
+
+    import tclk_watch as tw
+
+    tmp_dir = Path("/tmp/tclk_registry_flush_test")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True)
+    registry = tw.ContractRegistry(tmp_dir / "contracts.json")
+
+    real_replace = Path.replace
+    calls = {"n": 0}
+
+    def flaky_replace(self, target):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError("Access is denied")
+        return real_replace(self, target)
+
+    with unittest.mock.patch.object(Path, "replace", flaky_replace):
+        registry.record_accept("0x" + "aa" * 32, {"from": "x"}, {"from": "y"}, 0, "room")
+
+    assert calls["n"] == 3, "expected exactly two failures before the third attempt succeeded"
+    assert json.loads((tmp_dir / "contracts.json").read_text(encoding="utf-8"))
+    print("PASS: a transient PermissionError during the atomic rename is retried, "
+          "not left to crash the watcher")
+
+
+def test_registry_flush_reraises_after_exhausting_retries():
+    """A persistent lock (not a transient one) must still fail loudly, not hang or silently
+    drop the write -- the retry is a tolerance for a race, not a promise to wait forever."""
+    import unittest.mock
+
+    import tclk_watch as tw
+
+    tmp_dir = Path("/tmp/tclk_registry_flush_test_persistent")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True)
+    registry = tw.ContractRegistry(tmp_dir / "contracts.json")
+
+    def always_locked(self, target):
+        raise PermissionError("Access is denied")
+
+    raised = False
+    with unittest.mock.patch.object(Path, "replace", always_locked):
+        try:
+            registry.record_accept("0x" + "bb" * 32, {"from": "x"}, {"from": "y"}, 0, "room")
+        except PermissionError:
+            raised = True
+    assert raised, "a persistent lock must still raise, not be swallowed"
+    print("PASS: a persistent PermissionError still raises once retries are exhausted")
+
+
 if __name__ == "__main__":
     test_full_deal_lifecycle_across_two_rooms()
+    test_registry_flush_retries_a_transient_windows_permission_error()
+    test_registry_flush_reraises_after_exhausting_retries()
     print("\nALL CHECKS PASSED")
