@@ -196,9 +196,13 @@ python3 tclk_watch.py --out tclk-deals.jsonl --cursor-dir tclk-cursors/
 Runs forever: one persistent watcher on `tclk-offers`, plus one independent thread per
 accepted deal, spawned the moment its `accept` frame is seen and exiting on its own once
 the contract reaches a terminal state (`claimed`/`refunded`/`cancelled`). `--cursor-dir`
-holds one cursor file per watched room plus `contracts.json`, the restart-resumable
-registry — killing and restarting the tool picks every non-terminal deal back up without
-re-scanning `tclk-offers` from the start.
+holds one cursor file per watched room, `contracts.json` (the restart-resumable registry
+of every contract this tool has already discovered), and `offers_cache.json` (every
+still-open offer seen but not yet accepted) — killing and restarting the tool picks every
+non-terminal deal back up without re-scanning `tclk-offers` from the start, *and* still
+recognizes an accept whose offer was only ever seen in a previous run, which the registry
+alone can't do (see `OfferCache`'s own docstring — a real gap, found live after several
+days of restarts, not a hypothetical one).
 
 ### Output
 
@@ -215,7 +219,11 @@ One JSON object per line in `--out`, the same file across every room this tool w
   `{"event": "paper_rail_check", "contract": ..., "expected_status": ..., "ref_matches_contract": ...,
   "kv_record_found": ..., "kv_terms_match": ..., "note": ...}` for a `paper`-rail deal, once
   per status the check attempted (locked/claimed/refunded) and once per retry until it
-  resolves — see above for what a match does and doesn't mean.
+  resolves — see above for what a match does and doesn't mean; and
+  `{"event": "accept_unknown_offer", "ref": ..., "accept_from": ..., "seq": ...}` when an
+  `accept` names an offer this tool has no record of at all (expired out of the offer
+  cache, or genuinely never seen) — visible rather than silently dropped, same as every
+  other "this tool cannot vouch for that" case.
 
 ### Verification, independently
 

@@ -142,10 +142,6 @@ class ContractRegistry:
                     raise
                 time.sleep(0.2)
 
-    def known_offers(self) -> dict[str, dict]:
-        with self._lock:
-            return {c: v["offer"] for c, v in self._contracts.items() if "offer" in v}
-
     def pending(self) -> list[tuple[str, dict]]:
         """(contract, entry) for every contract not yet in a terminal status — what a
         restart needs to re-spawn watchers for."""
@@ -176,6 +172,68 @@ class ContractRegistry:
             if contract in self._contracts:
                 self._contracts[contract]["status"] = status
                 self._flush()
+
+
+class OfferCache:
+    """Durable index of every still-open offer seen on tclk-offers, keyed by offer id --
+    not just the ones that went on to be accepted.
+
+    `ContractRegistry` only remembers an offer once its accept has already been seen and
+    validated -- it has no entry at all for one that is still unaccepted, and no need to,
+    since its own job is tracking discovered contracts, not open offers. A real gap this
+    caused, seen live: `run_offers_board`'s in-memory
+    `known_offers` dict is rebuilt empty on every restart, so an offer seen in one process
+    lifetime whose accept only arrives after the next restart was never recognized --
+    `known_offers.get(frame["ref"])` missed, and the contract was silently never
+    discovered, even though both the offer and the accept are sitting right there in the
+    room's own history. This cache exists so that lookup survives a restart.
+
+    `path=None` runs purely in memory (what a test wants); anything else persists via the
+    same atomic-write-with-retry discipline as `ContractRegistry._flush`.
+    """
+
+    def __init__(self, path: Path | None):
+        self.path = path
+        self._lock = threading.Lock()
+        self._offers: dict[str, dict] = {}
+        if path is not None and path.exists():
+            try:
+                self._offers = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                raise SystemExit(
+                    f"offer cache {path} is corrupt — fix or delete it by hand "
+                    "before running again (same policy as a corrupt cursor file)"
+                ) from None
+
+    def _flush(self) -> None:
+        if self.path is None:
+            return
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(json.dumps(self._offers, indent=2, sort_keys=True), encoding="utf-8")
+        for attempt in range(5):
+            try:
+                tmp.replace(self.path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.2)
+
+    def all(self) -> dict[str, dict]:
+        with self._lock:
+            return dict(self._offers)
+
+    def add(self, offer: dict, now_ms: float | None = None) -> None:
+        """Records `offer` and, in the same pass, drops any cached offer whose own
+        `expiresMs` is already behind `now_ms` -- an unaccepted offer is only ever useful
+        for as long as it can still legally be accepted, so this bounds the cache's size
+        without a separate sweep loop."""
+        with self._lock:
+            self._offers[offer["id"]] = offer
+            if now_ms is not None:
+                self._offers = {oid: o for oid, o in self._offers.items()
+                                 if o.get("expiresMs", 0) > now_ms}
+            self._flush()
 
 
 # ── Per-contract frame processing ─────────────────────────────────────────────
@@ -469,7 +527,7 @@ def run_deal_room(
 
 def run_offers_board(
     args, sink: OutputSink, registry: ContractRegistry, spawned: dict,
-    stop: threading.Event | None = None,
+    stop: threading.Event | None = None, offer_cache: "OfferCache | None" = None,
 ) -> None:
     """The persistent watcher on tclk-offers: records offers, and on a valid accept spawns
     a new deal-room thread if the contract isn't already known (covers both a fresh accept
@@ -480,10 +538,16 @@ def run_offers_board(
     watched for the tool's whole life. A caller that needs a clean shutdown (tests; a future
     signal handler) passes its own Event and sets it, rather than killing the server or
     process out from under a thread that's still mid-poll.
+
+    `offer_cache` defaults to an in-memory-only instance, matching every existing test's
+    expectations; `run()` passes a disk-backed one so an offer survives a restart even
+    before it has an accept — see `OfferCache`'s own docstring for the bug this fixes.
     """
     if stop is None:
         stop = threading.Event()
-    known_offers: dict[str, dict] = dict(registry.known_offers())
+    if offer_cache is None:
+        offer_cache = OfferCache(None)
+    known_offers: dict[str, dict] = dict(offer_cache.all())
 
     def on_message(message: dict) -> None:
         text = message.get("text", "")
@@ -504,10 +568,19 @@ def run_offers_board(
 
         if frame["type"] == "offer":
             known_offers[frame["id"]] = frame
+            offer_cache.add(frame, now_ms=_ms(message["ts"]) if message.get("ts") else None)
         elif frame["type"] == "accept":
             offer = known_offers.get(frame["ref"])
             if offer is None:
-                return  # accept references an offer we never validated; nothing to open
+                # Either the offer already expired and was pruned from the cache, or
+                # nothing this process has ever run has seen it -- distinguishable only by
+                # trying the cache too, which known_offers is already seeded from, so this
+                # is a genuine miss either way. Visible rather than silent, per the module
+                # docstring's own "an unsigned frame is data, not a commitment" discipline
+                # applied to accepts referencing offers this tool cannot vouch for.
+                sink.write({"event": "accept_unknown_offer", "ref": frame["ref"],
+                            "accept_from": frame["from"], "seq": message.get("seq")})
+                return
             expected = tv.contract_id(offer, {k: frame.get(k) for k in
                                                ("from", "ref", "statement", "paymentKey", "nonce")
                                                if frame.get(k) is not None})
@@ -543,6 +616,7 @@ def main() -> None:
     cursor_dir.mkdir(parents=True, exist_ok=True)
     sink = OutputSink(Path(args.out))
     registry = ContractRegistry(cursor_dir / "contracts.json")
+    offer_cache = OfferCache(cursor_dir / "offers_cache.json")
     spawned: dict[str, threading.Thread] = {}
 
     # Resume every non-terminal contract from a prior run before joining the offers board,
@@ -561,7 +635,7 @@ def main() -> None:
               file=sys.stderr)
 
     try:
-        run_offers_board(args, sink, registry, spawned)
+        run_offers_board(args, sink, registry, spawned, offer_cache=offer_cache)
     except KeyboardInterrupt:
         print("\n[tclk-watch] stopped", file=sys.stderr)
 
