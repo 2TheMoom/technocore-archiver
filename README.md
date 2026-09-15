@@ -204,6 +204,13 @@ recognizes an accept whose offer was only ever seen in a previous run, which the
 alone can't do (see `OfferCache`'s own docstring — a real gap, found live after several
 days of restarts, not a hypothetical one).
 
+`--max-concurrent-deals` (default 20) caps how many of those resumed and freshly-discovered
+deal rooms are actively long-polling at once. Also found live: after several days without a
+single contract reaching a terminal state, the registry held thousands of entries, and a
+restart resuming all of them as simultaneous requests was rate-limited hard enough to starve
+the offers-board poll itself — a self-inflicted thundering herd on every restart, not
+evidence the deals were actually stuck. See `run_deal_room`'s own docstring.
+
 ### Output
 
 One JSON object per line in `--out`, the same file across every room this tool watches:

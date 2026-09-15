@@ -378,6 +378,7 @@ def watch_room(
 def run_deal_room(
     contract: str, offer: dict, accept: dict, accept_ts, room: str,
     args, sink: OutputSink, registry: ContractRegistry,
+    deal_slots: threading.Semaphore | None = None,
 ) -> None:
     """One thread per accepted deal. Exits (and lets the thread be reaped) once the
     contract reaches a terminal state.
@@ -386,7 +387,21 @@ def run_deal_room(
     is reconstructed by replaying open_contract(offer) -> apply_frame(accept) here — never
     hand-set, or every later lock/reveal/refund guard would compare against a None
     contract/statement/payer/payee and reject everything.
+
+    `deal_slots` bounds how many deal rooms are actively long-polling at once, across every
+    thread this process has spawned (defaults to effectively unbounded, matching every
+    existing test's expectations). Found live, not hypothesized: a restart resumes a
+    watcher thread for every non-terminal contract in the registry, and after several days
+    of continuous operation with zero contracts reaching a terminal state, that registry
+    held thousands of entries — spawning them all at once turned every restart into a
+    self-inflicted burst of simultaneous requests, so heavily rate-limited (429s on nearly
+    every room, including the offers board itself) that it plausibly explains the "zero
+    terminal states" observation better than any property of the deals themselves. Thread
+    creation stays immediate and cheap; only the actual network activity is throttled, by
+    holding the semaphore for exactly as long as this contract is being watched.
     """
+    if deal_slots is None:
+        deal_slots = threading.Semaphore(2**31 - 1)
     state = tv.open_contract(offer)
     state, ok, note = tv.apply_frame(state, accept, _ms(accept_ts))
     if not ok:
@@ -521,13 +536,15 @@ def run_deal_room(
             if is_terminal and (state.rail != "paper" or paper_resolved.get(state.status, False)):
                 stop.set()
 
-    watch_room(room, args.base_url, args.wait, Path(args.cursor_dir), on_message, stop,
-               label=f"deal {contract[:18]}", on_poll=on_poll)
+    with deal_slots:
+        watch_room(room, args.base_url, args.wait, Path(args.cursor_dir), on_message, stop,
+                   label=f"deal {contract[:18]}", on_poll=on_poll)
 
 
 def run_offers_board(
     args, sink: OutputSink, registry: ContractRegistry, spawned: dict,
     stop: threading.Event | None = None, offer_cache: "OfferCache | None" = None,
+    deal_slots: threading.Semaphore | None = None,
 ) -> None:
     """The persistent watcher on tclk-offers: records offers, and on a valid accept spawns
     a new deal-room thread if the contract isn't already known (covers both a fresh accept
@@ -542,6 +559,9 @@ def run_offers_board(
     `offer_cache` defaults to an in-memory-only instance, matching every existing test's
     expectations; `run()` passes a disk-backed one so an offer survives a restart even
     before it has an accept — see `OfferCache`'s own docstring for the bug this fixes.
+
+    `deal_slots`, forwarded unchanged to every deal-room thread this spawns, is what bounds
+    how many of them are actively polling at once — see `run_deal_room`'s docstring.
     """
     if stop is None:
         stop = threading.Event()
@@ -593,7 +613,8 @@ def run_offers_board(
                         "room": room, "offer_id": offer["id"], "detected_at": time.time()})
             t = threading.Thread(
                 target=run_deal_room,
-                args=(frame["contract"], offer, frame, accept_ts, room, args, sink, registry),
+                args=(frame["contract"], offer, frame, accept_ts, room, args, sink, registry,
+                      deal_slots),
                 daemon=True, name=f"deal-{frame['contract'][:10]}",
             )
             spawned[frame["contract"]] = t
@@ -610,6 +631,12 @@ def main() -> None:
                          help="directory holding one cursor file per watched room, plus the contract registry")
     parser.add_argument("--base-url", default="https://technocore.chat")
     parser.add_argument("--wait", type=float, default=10.0)
+    parser.add_argument("--max-concurrent-deals", type=int, default=20,
+                         help="cap on deal rooms actively long-polling at once (default 20) -- "
+                              "a restart resumes every non-terminal contract in the registry, "
+                              "which after enough uptime can be thousands; spawning them all as "
+                              "simultaneous requests self-inflicts rate-limiting on every room, "
+                              "the offers board included. See run_deal_room's own docstring.")
     args = parser.parse_args()
 
     cursor_dir = Path(args.cursor_dir)
@@ -617,25 +644,28 @@ def main() -> None:
     sink = OutputSink(Path(args.out))
     registry = ContractRegistry(cursor_dir / "contracts.json")
     offer_cache = OfferCache(cursor_dir / "offers_cache.json")
+    deal_slots = threading.BoundedSemaphore(args.max_concurrent_deals)
     spawned: dict[str, threading.Thread] = {}
 
     # Resume every non-terminal contract from a prior run before joining the offers board,
-    # so a deal doesn't sit unwatched for a whole poll cycle after a restart.
+    # so a deal doesn't sit unwatched for a whole poll cycle after a restart. Threads are
+    # started immediately and cheaply either way; deal_slots is what actually staggers the
+    # network activity, so this loop no longer needs to throttle itself.
     for contract, entry in registry.pending():
         t = threading.Thread(
             target=run_deal_room,
             args=(contract, entry["offer"], entry["accept"], entry["accept_ts"], entry["room"],
-                  args, sink, registry),
+                  args, sink, registry, deal_slots),
             daemon=True, name=f"deal-{contract[:10]}",
         )
         spawned[contract] = t
         t.start()
     if spawned:
-        print(f"[tclk-watch] resumed {len(spawned)} non-terminal contract(s) from a prior run",
-              file=sys.stderr)
+        print(f"[tclk-watch] resumed {len(spawned)} non-terminal contract(s) from a prior run "
+              f"(at most {args.max_concurrent_deals} polling at once)", file=sys.stderr)
 
     try:
-        run_offers_board(args, sink, registry, spawned, offer_cache=offer_cache)
+        run_offers_board(args, sink, registry, spawned, offer_cache=offer_cache, deal_slots=deal_slots)
     except KeyboardInterrupt:
         print("\n[tclk-watch] stopped", file=sys.stderr)
 
