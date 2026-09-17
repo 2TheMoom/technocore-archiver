@@ -148,10 +148,25 @@ class Cursor:
         return seq, generation
 
     def write(self, seq: int, generation: int | None) -> None:
+        """Windows' filesystem can transiently refuse to open-for-write or rename a file
+        another process (antivirus, an indexer, a backup tool) has open for a moment,
+        raising PermissionError where POSIX would have just succeeded. Seen live, crashing
+        the whole archiver on a routine cursor write, not just on the rename step this
+        retry was originally written for (see tclk_watch.py's ContractRegistry._flush,
+        which has the same discipline for the same reason) -- so the retry here wraps the
+        write too, not only the replace.
+        """
         body = str(seq) if generation is None else f"{seq}\n{generation}"
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text(body, encoding="utf-8")
-        tmp.replace(self.path)  # atomic on both POSIX and Windows
+        for attempt in range(5):
+            try:
+                tmp.write_text(body, encoding="utf-8")
+                tmp.replace(self.path)  # atomic on both POSIX and Windows
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.2)
 
 
 def classify(room: str, message: dict) -> str:

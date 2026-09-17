@@ -32,3 +32,4 @@ jobs:
           python3 tests/test_sonnet_registration_census.py
           python3 tests/test_offer_cache_restart.py
           python3 tests/test_deal_concurrency_cap.py
+          python3 tests/test_archiver_cursor.py
