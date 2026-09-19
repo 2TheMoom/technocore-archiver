@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import collections
 import json
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -71,12 +72,25 @@ def census(records: Iterable[dict]) -> dict:
 
 
 def _read_jsonl(path: Path) -> list[dict]:
+    """Skips, rather than crashes on, a line that isn't valid JSON. Seen live: a forced
+    process kill (a crash, a disk-full OSError, this machine sleeping mid-write) can leave
+    exactly one line truncated mid-write, splitting what should be one JSON object across
+    two lines -- a handful of unrecoverable fragments out of hundreds of thousands of
+    otherwise-intact lines, not a reason to lose the whole file's analysis."""
     records = []
+    skipped = 0
     with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 records.append(json.loads(line))
+            except json.JSONDecodeError:
+                skipped += 1
+    if skipped:
+        print(f"warning: skipped {skipped} malformed line(s) in {path} "
+              "(likely a write interrupted mid-line)", file=sys.stderr)
     return records
 
 

@@ -30,6 +30,7 @@ jobs:
           python3 tests/test_kibble_tclk_xref.py
           python3 tests/test_tclk_frame_conformance.py
           python3 tests/test_sonnet_registration_census.py
+          python3 tests/test_read_jsonl_skips_malformed_lines.py
           python3 tests/test_offer_cache_restart.py
           python3 tests/test_deal_concurrency_cap.py
           python3 tests/test_archiver_cursor.py
