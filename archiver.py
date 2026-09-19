@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import re
 import sys
@@ -218,7 +219,12 @@ def run(args: argparse.Namespace) -> None:
 
         try:
             view = fetch_json(url, timeout=args.wait + 15)
-        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError,
+                http.client.IncompleteRead) as exc:
+            # IncompleteRead is its own hierarchy (http.client.HTTPException), not an
+            # OSError -- a connection dropped mid-response, seen live, was not caught by
+            # any of the exceptions above and crashed the whole archiver on what should
+            # have been an ordinary retry.
             print(f"[archiver] fetch failed, retrying in 5s: {exc}", file=sys.stderr)
             time.sleep(5)
             continue

@@ -44,6 +44,7 @@ single one-shot check would misreport a normal race as a mismatch. Every other r
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import sys
 import threading
@@ -349,7 +350,10 @@ def watch_room(
             url = f"{base_url}/r/{room}?since={last_seq}&wait={wait}&limit=200&format=json"
         try:
             view = base.fetch_json(url, timeout=wait + 15)
-        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError,
+                http.client.IncompleteRead) as exc:
+            # IncompleteRead is its own hierarchy (http.client.HTTPException), not an
+            # OSError -- see archiver.py's own fetch loop for the same fix.
             print(f"[tclk-watch] {label}: fetch failed, retrying in 5s: {exc}", file=sys.stderr)
             time.sleep(5)
             continue
@@ -449,7 +453,7 @@ def run_deal_room(
         ns, key = tv.paper_note(state.contract)
         try:
             raw = read_note(args.base_url, ns, key, timeout=10)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead) as exc:
             report["kv_checked"] = False
             if give_up:
                 paper_resolved[expected_status] = True
