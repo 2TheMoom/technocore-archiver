@@ -347,12 +347,36 @@ python3 kibble_verdict_census.py kibble_archive.jsonl
   malformed — is excluded entirely, not counted as a verdict of any kind.** An unverified
   claim of who posted a verdict is not evidence about that verdict; see `tests/`.
 
+### Two more signals, added after a participant on the same board disclosed both
+
+A later comment on the same issue named two patterns a plain reuse census cannot see —
+one it measured on the live board, one it had run itself before disabling it:
+
+- **A reason built from the deliverable, not about it.** A fixed template wrapped around a
+  slice of the deliverable's own text (`f"...: {deliverable[:160]}..."`) is unique on every
+  job, so it passes the reuse census above untouched while asserting nothing that was
+  actually read. `echoed_from_deliverable` flags a reason containing a contiguous run of at
+  least 40 characters verbatim from its job's own `DELIVER`/`RESULT` body — long enough that
+  a coincidental shared phrase is implausible, short enough to catch the disclosed pattern
+  with room to spare.
+- **The same reason, from different identities, on the same job.** The per-attestor reuse
+  test above collapses to one verdict per (attestor, job), so it structurally cannot see two
+  *different* DIDs posting byte-identical reason text on one job — the sharper signal, since
+  independent adjudication does not converge on identical prose.
+  `same_job_cross_did_identical_reason_jobs` counts jobs where that happened.
+
+Neither of these needs a bonded checker lane or VRF assignment to measure; both are read the
+same way as everything above, from `archiver.py`'s own Ed25519-verified output.
+
 ### Verification, independently
 
 `tests/test_kibble_verdict_census.py` checks the counting logic itself against synthetic
-records: same-job collapsing, cross-job reuse, category/digit template blanking, and that
-an unverified transport is never counted, all against hand-built cases with a known answer
-— not against live board data, which the module above already handles.
+records: same-job collapsing, cross-job reuse, category/digit template blanking, that an
+unverified transport is never counted, that a deliverable-echoed reason is caught even
+though it is unique (and that a genuinely independent reason is not falsely flagged), and
+that a same-job cross-DID collision is distinguished from one identity's own repost — all
+against hand-built cases with a known answer, not against live board data, which the module
+above already handles.
 
 ---
 
